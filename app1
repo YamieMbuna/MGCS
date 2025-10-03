@@ -1,0 +1,657 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+// Firebase Imports
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithEmailAndPassword, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, collection, query, onSnapshot, getDoc, updateDoc } from 'firebase/firestore';
+
+// Define Malawian Flag Colors for Tailwind use
+const colors = {
+  malawiBlack: '#000000', // Represents the people
+  malawiRed: '#DE3831', // Represents the struggle/Rising Sun (Used for critical alerts)
+  malawiGreen: '#00843D', // Represents vegetation (Primary branding color)
+  malawiGray: '#f0f2f5', // Light background for the "Facebook UI" feel
+};
+
+// Mock Data Definitions
+const MOCK_CURRENT_USER = {
+  uid: 'mw_admin_yami',
+  name: 'Yami Mbuna (Demo Admin)',
+  title: 'Principal Secretary',
+  department: 'Ministry of Health',
+  email: 'yamiembuna@gmail.com',
+  location: 'Capital Hill - Office 3A',
+  reportsTo: 'Minister of Health',
+};
+
+const MOCK_GOVT_FEED = [
+  {
+    id: 1,
+    title: 'Presidential Announcement: National Budget Review Session',
+    body: 'All Principal Secretaries and Directors are required to attend the Extraordinary Session for the 2024/2025 Budget Review on Monday, October 14th, 2025 at the Capital Hill Conference Centre, Lilongwe. Please confirm attendance by end of day Friday.',
+    author: 'Office of the President and Cabinet (OPC)',
+    priority: 'High',
+    timestamp: '2 hours ago',
+    type: 'Notice',
+  },
+  {
+    id: 2,
+    title: 'National Holiday Closure Notice',
+    body: 'Government offices will be closed on Friday, 6th July 2025, in observance of Independence Day. Essential services personnel should adhere to pre-defined rotation schedules.',
+    author: 'Chief Secretary',
+    priority: 'Standard',
+    timestamp: '1 day ago',
+    type: 'Notice',
+  },
+];
+
+const MOCK_DEPT_FEED = [
+  {
+    id: 101,
+    title: 'Update on National Malaria Campaign Reporting Protocol (Q4)',
+    body: 'Effective immediately, all district health officers must submit their weekly campaign success metrics using the new Form D45, available in the shared resources folder. Old reporting formats (D40) will be rejected starting November 1st. Please disseminate this update to all relevant staff.',
+    author: 'Dr. Banda, Director of Public Health',
+    priority: 'Standard',
+    timestamp: '3 hours ago',
+    type: 'Memo',
+  },
+  {
+    id: 102,
+    title: 'Internal Vacancy: Senior Planning Officer',
+    body: 'The Planning Unit has an opening for a Senior Planning Officer. Internal applications close next Friday. See the HR portal link for requirements.',
+    author: 'HR Department - MoH',
+    priority: 'Standard',
+    timestamp: '2 days ago',
+    type: 'Vacancy',
+  },
+];
+
+const MOCK_DIRECTORY = [
+  { name: 'Dr. Banda', title: 'Director of Public Health', department: 'Ministry of Health', location: 'Lilongwe', email: 'dbanda@moh.mw' },
+  { name: 'S. Kawale', title: 'Minister', department: 'Ministry of Agriculture', location: 'Capital Hill', email: 'skawale@moa.mw' },
+  { name: 'N. Tembo', title: 'Minister', department: 'Ministry of Foreign Affairs', location: 'Lilongwe', email: 'ntembo@mofa.mw' },
+];
+
+// Reusable components
+const Card = ({ children, color = 'white' }) => (
+  <div className={`bg-${color} p-4 rounded-xl shadow-lg mb-4`}>
+    {children}
+  </div>
+);
+
+const Notification = ({ post }) => {
+  const isCritical = post.priority === 'High';
+  return (
+    <Card color="white">
+      <div className="flex items-start">
+        <div className={`mr-3 p-2 rounded-full ${isCritical ? 'bg-malawiRed' : 'bg-malawiGreen'} text-white`}>
+          {isCritical ? (
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+            </svg>
+          ) : (
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 5h12a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V7a2 2 0 012-2z" />
+            </svg>
+          )}
+        </div>
+        <div>
+          <h3 className={`font-bold text-lg ${isCritical ? 'text-malawiRed' : 'text-malawiBlack'}`}>{post.title}</h3>
+          <p className="text-sm text-gray-500 mb-2">
+            {post.author} | <span className="font-semibold">{post.type}</span> | {post.timestamp}
+          </p>
+          <p className="text-gray-700">{post.body}</p>
+          {isCritical && (
+            <button className="mt-3 bg-malawiRed text-white px-4 py-2 rounded-lg text-sm hover:opacity-90 transition-opacity">
+              Confirm Mandatory Read
+            </button>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+};
+
+// --- Screen Components ---
+
+const FeedsScreen = ({ currentUser, allFeed, deptFeed, activeFeed, setActiveFeed }) => {
+  const currentFeed = activeFeed === 'all' ? allFeed : deptFeed;
+
+  return (
+    <div className="p-4">
+      <h1 className="text-2xl font-bold text-malawiBlack mb-4">Official Feeds</h1>
+      
+      {/* Feed Toggle */}
+      <div className="flex bg-gray-200 p-1 rounded-full mb-6 shadow-inner">
+        <button
+          onClick={() => setActiveFeed('all')}
+          className={`flex-1 py-2 text-sm font-semibold rounded-full transition-colors ${
+            activeFeed === 'all'
+              ? 'bg-malawiGreen text-white shadow-md'
+              : 'text-gray-600 hover:bg-gray-300'
+          }`}
+        >
+          All-Government
+        </button>
+        <button
+          onClick={() => setActiveFeed('dept')}
+          className={`flex-1 py-2 text-sm font-semibold rounded-full transition-colors ${
+            activeFeed === 'dept'
+              ? 'bg-malawiGreen text-white shadow-md'
+              : 'text-gray-600 hover:bg-gray-300'
+          }`}
+        >
+          {currentUser.department}
+        </button>
+      </div>
+
+      {/* Feed Content */}
+      {currentFeed.length > 0 ? (
+        currentFeed.map(post => <Notification key={post.id} post={post} />)
+      ) : (
+        <Card>
+          <p className="text-gray-500">No new notices for this feed.</p>
+        </Card>
+      )}
+    </div>
+  );
+};
+
+const DirectoryScreen = () => {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState(MOCK_DIRECTORY);
+
+  useEffect(() => {
+    const results = MOCK_DIRECTORY.filter(person =>
+      Object.values(person).some(val =>
+        val.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    );
+    setSearchResults(results);
+  }, [searchQuery]);
+
+  return (
+    <div className="p-4">
+      <h1 className="text-2xl font-bold text-malawiBlack mb-4">Personnel Directory</h1>
+      <input
+        type="text"
+        placeholder="Search Name, Title, or Department..."
+        value={searchQuery}
+        onChange={(e) => setSearchQuery(e.target.value)}
+        className="w-full p-3 mb-4 border border-gray-300 rounded-xl focus:ring-2 focus:ring-malawiGreen focus:border-malawiGreen transition duration-150"
+      />
+
+      <div className="space-y-3">
+        {searchResults.length > 0 ? (
+          searchResults.map((person, index) => (
+            <Card key={index}>
+              <h3 className="font-bold text-malawiGreen text-lg">{person.name}</h3>
+              <p className="text-gray-800 text-sm">{person.title} - {person.department}</p>
+              <div className="mt-2 text-xs space-y-1">
+                <p className="flex items-center text-gray-600">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.828 0l-4.243-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                  {person.location}
+                </p>
+                <p className="flex items-center text-gray-600">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+                  {person.email}
+                </p>
+              </div>
+            </Card>
+          ))
+        ) : (
+          <Card>
+            <p className="text-gray-500">No government officials found matching your search.</p>
+          </Card>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const MessagingScreen = () => (
+  <div className="p-4">
+    <h1 className="text-2xl font-bold text-malawiBlack mb-4">Secure Messaging</h1>
+    <Card>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="font-semibold text-gray-800">New Secure Chat</h3>
+        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-malawiGreen" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+      </div>
+      <p className="text-sm text-gray-600 mb-2">
+        <span className="font-bold text-malawiRed">E2EE Active:</span> All messages and files are protected by the Signal Protocol.
+      </p>
+      <div className="border-t pt-2 mt-2 space-y-2">
+        <div className="flex justify-between items-center p-2 bg-gray-50 rounded-lg">
+          <span className="font-medium">Finance Dept Group</span>
+          <span className="text-xs text-malawiGreen">2 new messages</span>
+        </div>
+        <div className="flex justify-between items-center p-2 bg-gray-50 rounded-lg">
+          <span className="font-medium">J. Banda (OPC)</span>
+          <span className="text-xs text-gray-400">Read 1h ago</span>
+        </div>
+        <div className="flex justify-between items-center p-2 bg-gray-50 rounded-lg">
+          <span className="font-medium">Transport Mins.</span>
+          <span className="text-xs text-gray-400">No unread messages</span>
+        </div>
+      </div>
+    </Card>
+  </div>
+);
+
+const AIAssistantScreen = () => {
+  const [query, setQuery] = useState('');
+  const [response, setResponse] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [chatHistory, setChatHistory] = useState([]);
+  const apiKey = "" // If you want to use models other than gemini-2.5-flash-preview-05-20 or imagen-3.0-generate-002, provide an API key here. Otherwise, leave this as-is.
+
+  const systemPrompt = "You are the M-GCS AI Assistant, a secure, internal resource for the Government of Malawi. Your primary function is to provide instant, factual responses and summaries grounded exclusively in Malawian public policy documents and internal SOPs. Always maintain a professional and formal tone. You MUST use Google Search to ground your answers in real-time government information. If the information is not publicly available or cannot be verified, state professionally that you are unable to fulfill the request from the designated corpus/external resources.";
+  
+  const GEMINI_MODEL = 'gemini-2.5-flash-preview-05-20';
+  const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!query.trim()) return;
+
+    const newQuery = query.trim();
+    setQuery('');
+    
+    const userMessage = { text: newQuery, sender: 'user' };
+    setChatHistory(prev => [...prev, userMessage]);
+    setLoading(true);
+
+    const fullChatHistory = [...chatHistory, userMessage].map(msg => ({
+      role: msg.sender === 'user' ? 'user' : 'model',
+      parts: [{ text: msg.text }]
+    }));
+
+    const payload = {
+      contents: fullChatHistory,
+      tools: [{ "google_search": {} }],
+      systemInstruction: {
+        parts: [{ text: systemPrompt }]
+      },
+    };
+
+    try {
+      const MAX_RETRIES = 5;
+      let attempt = 0;
+      let apiResponse;
+
+      while (attempt < MAX_RETRIES) {
+        try {
+          const res = await fetch(API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          apiResponse = await res.json();
+          if (res.ok) break; // Exit loop on successful response
+        } catch (error) {
+          console.log(`Attempt ${attempt + 1} failed, retrying...`);
+        }
+        attempt++;
+        if (attempt < MAX_RETRIES) {
+          const delay = Math.pow(2, attempt) * 1000;
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          throw new Error('API call failed after multiple retries.');
+        }
+      }
+
+      const candidate = apiResponse.candidates?.[0];
+      let generatedText = "Error: Could not retrieve a valid response.";
+      let sources = [];
+      
+      if (candidate && candidate.content?.parts?.[0]?.text) {
+        generatedText = candidate.content.parts[0].text;
+        
+        const groundingMetadata = candidate.groundingMetadata;
+        if (groundingMetadata && groundingMetadata.groundingAttributions) {
+            sources = groundingMetadata.groundingAttributions
+                .map(attribution => ({
+                    uri: attribution.web?.uri,
+                    title: attribution.web?.title,
+                }))
+                .filter(source => source.uri && source.title); // Ensure sources are valid
+        }
+      }
+
+      const modelMessage = { text: generatedText, sender: 'model', sources };
+      setChatHistory(prev => [...prev, modelMessage]);
+
+    } catch (error) {
+      console.error('Error generating content:', error);
+      setChatHistory(prev => [...prev, { text: 'System Error: Failed to connect to the AI Assistant. Please try again.', sender: 'system' }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const MemoizedChatHistory = useMemo(() => (
+    <div className="space-y-4 flex-grow overflow-y-auto p-4 bg-gray-50 rounded-lg">
+      {chatHistory.length === 0 ? (
+        <p className="text-center text-gray-500 mt-4">Ask the M-GCS AI Assistant about Malawian public policy, recent directives, or administrative guidance.</p>
+      ) : (
+        chatHistory.map((msg, index) => (
+          <div
+            key={index}
+            className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+          >
+            <div
+              className={`max-w-3/4 p-3 rounded-xl shadow-md ${
+                msg.sender === 'user'
+                  ? 'bg-malawiGreen text-white rounded-br-none'
+                  : 'bg-white text-gray-800 rounded-tl-none border border-gray-200'
+              }`}
+            >
+              <p className="text-sm">{msg.text}</p>
+              {msg.sources && msg.sources.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-gray-200 text-xs text-gray-600">
+                    <span className="font-semibold text-malawiGreen">Sources:</span>
+                    {msg.sources.map((source, idx) => (
+                      <p key={idx} className="truncate italic">
+                        <a href={source.uri} target="_blank" rel="noopener noreferrer" className="hover:underline">
+                            {source.title || source.uri}
+                        </a>
+                      </p>
+                    ))}
+                </div>
+            )}
+            </div>
+          </div>
+        ))
+      )}
+      {loading && (
+        <div className="flex justify-start">
+          <div className="bg-white p-3 rounded-xl rounded-tl-none border border-gray-200 text-gray-600">
+            <div className="flex space-x-1">
+              <div className="h-2 w-2 bg-malawiGreen rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+              <div className="h-2 w-2 bg-malawiGreen rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+              <div className="h-2 w-2 bg-malawiGreen rounded-full animate-bounce"></div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  ), [chatHistory, loading]);
+
+  return (
+    <div className="flex flex-col h-full">
+      <h1 className="text-2xl font-bold text-malawiBlack p-4 pb-2">M-GCS AI Assistant</h1>
+      <p className="text-sm text-gray-500 px-4 pb-4">Secure, Policy-Grounded AI for the Civil Service.</p>
+      
+      {MemoizedChatHistory}
+      
+      {/* Input Area */}
+      <form onSubmit={handleSubmit} className="p-4 border-t bg-white">
+        <div className="flex space-x-2">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Ask about policy or procedure..."
+            className="flex-grow p-3 border border-gray-300 rounded-full focus:ring-2 focus:ring-malawiGreen focus:border-malawiGreen transition duration-150 disabled:bg-gray-100"
+            disabled={loading}
+          />
+          <button
+            type="submit"
+            className="p-3 rounded-full bg-malawiGreen text-white hover:bg-opacity-90 transition-opacity disabled:bg-gray-400"
+            disabled={loading}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 9l3 3m0 0l-3 3m3-3H8m13 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
+// --- Main Application Component ---
+
+const App = () => {
+  const [activeTab, setActiveTab] = useState('feeds');
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [userId, setUserId] = useState(null);
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [loginError, setLoginError] = useState('');
+  const [email, setEmail] = useState('yamiembuna@gmail.com');
+  const [password, setPassword] = useState('Yam1kan!');
+
+  // --- 1. Firebase Initialization & Auth ---
+  useEffect(() => {
+    try {
+      // Global variables are assumed to be available in the canvas environment
+      const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+      const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+      const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+      if (!firebaseConfig) {
+        console.error("Firebase config is missing.");
+        setIsAuthReady(true);
+        return;
+      }
+      
+      const app = initializeApp(firebaseConfig);
+      const firestore = getFirestore(app);
+      const authentication = getAuth(app);
+      
+      setDb(firestore);
+      setAuth(authentication);
+
+      // Listener for Auth state changes
+      const unsubscribe = onAuthStateChanged(authentication, (user) => {
+        if (user) {
+          setUserId(user.uid);
+          setIsAuthenticated(true);
+          console.log("User authenticated:", user.uid);
+        } else {
+          setUserId(null);
+          setIsAuthenticated(false);
+          console.log("User signed out.");
+        }
+        setIsAuthReady(true);
+      });
+
+      // Attempt initial custom token or anonymous sign-in
+      const authenticate = async () => {
+        if (initialAuthToken) {
+          await signInWithCustomToken(authentication, initialAuthToken).catch(e => {
+            console.error("Custom token sign-in failed, attempting anonymous.", e);
+            signInAnonymously(authentication);
+          });
+        } else {
+          // Fallback to anonymous sign-in if no custom token is available
+          await signInAnonymously(authentication);
+        }
+      };
+      
+      authenticate();
+      return () => unsubscribe();
+      
+    } catch (e) {
+      console.error("Firebase setup failed:", e);
+      setIsAuthReady(true);
+    }
+  }, []); // Run only once for initialization
+
+  // --- 2. Custom Login Function (for demo user) ---
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+
+    if (!auth) {
+      setLoginError('Authentication service not ready.');
+      return;
+    }
+
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+      // Auth state change handler will set isAuthenticated to true
+      console.log('Login successful.');
+    } catch (error) {
+      console.error('Login error:', error.code, error.message);
+      // Display user-friendly error
+      if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
+        setLoginError('Invalid username or password. Check demo credentials.');
+      } else {
+        setLoginError('Login failed. Please check your network connection.');
+      }
+    }
+  };
+
+  // --- 3. Render Logic ---
+
+  if (!isAuthReady) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-malawiGray">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-malawiGreen border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
+          <p className="text-malawiBlack">Loading M-GCS System...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // --- Login Screen ---
+  if (!isAuthenticated) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-malawiGray p-4">
+        <div className="w-full max-w-sm bg-white p-6 rounded-2xl shadow-2xl border-t-8 border-malawiGreen">
+          <h1 className="text-3xl font-bold text-center text-malawiBlack mb-2">M-GCS Login</h1>
+          <p className="text-center text-gray-500 mb-6">Government Communications System</p>
+          
+          <form onSubmit={handleLogin} className="space-y-4">
+            <input
+              type="email"
+              placeholder="Official Email (e.g., yamiembuna@gmail.com)"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-malawiGreen focus:border-malawiGreen"
+            />
+            <input
+              type="password"
+              placeholder="Password (e.g., Yam1kan!)"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-malawiGreen focus:border-malawiGreen"
+            />
+            {loginError && (
+              <p className="text-malawiRed text-sm font-medium">{loginError}</p>
+            )}
+            <button
+              type="submit"
+              className="w-full bg-malawiGreen text-white font-bold py-3 rounded-lg shadow-md hover:bg-opacity-90 transition-opacity"
+            >
+              Secure Login
+            </button>
+          </form>
+
+          <p className="text-xs text-center text-gray-400 mt-6">
+            <span className="font-semibold text-malawiRed">Security Note:</span> This is a restricted system. All sessions are logged and encrypted using AES-256.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // --- Main App UI ---
+  const renderScreen = () => {
+    switch (activeTab) {
+      case 'feeds':
+        return (
+          <FeedsScreen
+            currentUser={MOCK_CURRENT_USER}
+            allFeed={MOCK_GOVT_FEED}
+            deptFeed={MOCK_DEPT_FEED}
+            activeFeed='all' // Default to all
+            setActiveFeed={setActiveTab} // Re-using to set the sub-tab (all/dept)
+          />
+        );
+      case 'directory':
+        return <DirectoryScreen />;
+      case 'messaging':
+        return <MessagingScreen />;
+      case 'aiAssistant':
+        return <AIAssistantScreen />;
+      default:
+        return <FeedsScreen
+            currentUser={MOCK_CURRENT_USER}
+            allFeed={MOCK_GOVT_FEED}
+            deptFeed={MOCK_DEPT_FEED}
+            activeFeed='all'
+          />;
+    }
+  };
+
+  const NavItem = ({ tab, icon, label }) => (
+    <button
+      onClick={() => setActiveTab(tab)}
+      className={`flex flex-col items-center p-2 transition-colors ${
+        activeTab === tab ? 'text-malawiGreen' : 'text-gray-500 hover:text-malawiGreen'
+      }`}
+    >
+      <div className='relative'>
+        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          {icon}
+        </svg>
+      </div>
+      <span className="text-xs mt-1 font-medium">{label}</span>
+    </button>
+  );
+
+  return (
+    <div className="min-h-screen bg-malawiGray flex flex-col max-w-lg mx-auto shadow-2xl">
+      {/* Header */}
+      <div className="bg-white p-4 shadow-md sticky top-0 z-10">
+        <div className="flex justify-between items-center">
+          <h2 className="text-xl font-extrabold text-malawiBlack flex items-center">
+            <div className="w-2 h-2 rounded-full bg-malawiGreen mr-2"></div>
+            M-GCS
+          </h2>
+          <div className="text-right">
+            <p className="text-sm font-semibold text-malawiBlack">{MOCK_CURRENT_USER.name}</p>
+            <p className="text-xs text-gray-500">{MOCK_CURRENT_USER.department}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Content Area */}
+      <div className="flex-grow overflow-y-auto" style={{ height: 'calc(100vh - 120px)' }}>
+        {renderScreen()}
+      </div>
+
+      {/* Bottom Navigation */}
+      <div className="bg-white border-t border-gray-200 sticky bottom-0 z-10">
+        <div className="flex justify-around">
+          <NavItem
+            tab="feeds"
+            label="Feeds"
+            icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />}
+          />
+          <NavItem
+            tab="directory"
+            label="Directory"
+            icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />}
+          />
+          <NavItem
+            tab="messaging"
+            label="Chat"
+            icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />}
+          />
+          <NavItem
+            tab="aiAssistant"
+            label="AI Assist"
+            icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.879 16.121A3 3 0 1012.015 11h3.984a2 2 0 011.984 2.195 9 9 0 01-18.028 0c0-1.026.155-2.016.44-2.956M8.76 17.51a1 1 0 001.218 0 1 1 0 01.554.768v.015h4.192a1 1 0 000-2h-.14a1 1 0 00-.987 1.053l-.004.225-.018.995h-.01a1 1 0 00.987 1.053z" />}
+          />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default App;
